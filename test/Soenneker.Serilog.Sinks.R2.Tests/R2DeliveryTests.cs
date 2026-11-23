@@ -148,7 +148,7 @@ public sealed class R2DeliveryTests
         await using var services = R2TestServices.Create(http);
         var sink = Sink(services, timeout: TimeSpan.FromMilliseconds(50));
         await Assert.That(async () => await sink.EmitBatchAsync([Event("deadline")]).WaitAsync(TimeSpan.FromSeconds(5)))
-            .Throws<TaskCanceledException>();
+            .Throws<OperationCanceledException>();
     }
 
     [Test, Arguments("../other"), Arguments("a/./b"), Arguments("a//b"), Arguments("a\\b")]
