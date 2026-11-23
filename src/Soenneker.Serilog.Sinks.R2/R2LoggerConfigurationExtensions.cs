@@ -3,7 +3,7 @@ using Serilog;
 using Serilog.Configuration;
 using Serilog.Core;
 using Serilog.Events;
-using Soenneker.Cloudflare.HttpClient.Abstract;
+using Soenneker.Cloudflare.R2.Abstract;
 
 namespace Soenneker.Serilog.Sinks.R2;
 
@@ -12,7 +12,7 @@ public static class R2LoggerConfigurationExtensions
 {
     /// <summary>Uploads UTF-8 newline-delimited JSON to an existing R2 bucket using Serilog's background batching.</summary>
     /// <param name="writeTo">The logger's sink configuration.</param>
-    /// <param name="getClient">Resolves the application-owned Cloudflare HTTP client provider when a batch needs uploading.</param>
+    /// <param name="getR2">Resolves the application-owned Cloudflare R2 utility when a batch needs uploading.</param>
     /// <param name="accountId">Cloudflare account that owns the bucket.</param>
     /// <param name="bucketName">Destination bucket name.</param>
     /// <param name="prefix">Optional object key prefix. An empty string writes directly under the UTC date partition.</param>
@@ -21,13 +21,13 @@ public static class R2LoggerConfigurationExtensions
     /// <param name="levelSwitch">Optional dynamic minimum level switch.</param>
     /// <param name="maxObjectBytes">Maximum UTF-8 bytes per object, including line delimiters. Oversized individual events are reported and skipped.</param>
     /// <param name="uploadTimeout">Deadline per upload attempt, including response processing. Defaults to 30 seconds.</param>
-    public static LoggerConfiguration R2(this LoggerSinkConfiguration writeTo, Func<ICloudflareHttpClient> getClient,
+    public static LoggerConfiguration R2(this LoggerSinkConfiguration writeTo, Func<ICloudflareR2Util> getR2,
         string accountId, string bucketName, string prefix = "logs", BatchingOptions? batchingOptions = null,
         LogEventLevel restrictedToMinimumLevel = LevelAlias.Minimum, LoggingLevelSwitch? levelSwitch = null,
         int maxObjectBytes = 4 * 1024 * 1024, TimeSpan? uploadTimeout = null)
     {
         ArgumentNullException.ThrowIfNull(writeTo);
-        ArgumentNullException.ThrowIfNull(getClient);
+        ArgumentNullException.ThrowIfNull(getR2);
         ArgumentException.ThrowIfNullOrWhiteSpace(accountId);
         ArgumentException.ThrowIfNullOrWhiteSpace(bucketName);
         ArgumentNullException.ThrowIfNull(prefix);
@@ -39,7 +39,7 @@ public static class R2LoggerConfigurationExtensions
             throw new ArgumentOutOfRangeException(nameof(uploadTimeout));
 
         var destination = new R2Destination(accountId, bucketName, prefix);
-        var sink = new R2Sink(getClient, destination, maxObjectBytes, timeout);
+        var sink = new R2Sink(getR2, destination, maxObjectBytes, timeout);
         batchingOptions ??= new BatchingOptions { EagerlyEmitFirstEvent = false };
 
         // Transport diagnostics still reach sibling sinks. Re-enqueuing them here would generate endless uploads.
@@ -47,4 +47,3 @@ public static class R2LoggerConfigurationExtensions
             target.Sink(sink, batchingOptions, restrictedToMinimumLevel, levelSwitch));
     }
 }
-

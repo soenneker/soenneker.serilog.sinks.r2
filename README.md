@@ -14,19 +14,19 @@ dotnet add package Soenneker.Serilog.Sinks.R2
 
 ## Configure the sink
 
-Register the Cloudflare HTTP client provider and resolve it when the first batch is ready. The following example uses Serilog's hosting integration.
+Register the Cloudflare R2 utility and resolve it when the first batch is ready. The following example uses Serilog's hosting integration.
 
 ```csharp
 using Microsoft.Extensions.DependencyInjection;
 using Serilog;
-using Soenneker.Cloudflare.HttpClient.Abstract;
-using Soenneker.Cloudflare.HttpClient.Registrars;
+using Soenneker.Cloudflare.R2.Abstract;
+using Soenneker.Cloudflare.R2.Registrars;
 using Soenneker.Serilog.Sinks.R2;
 
-builder.Services.AddCloudflareHttpClientAsSingleton();
+builder.Services.AddCloudflareR2UtilAsSingleton();
 builder.Services.AddSerilog((services, logger) => logger
     .WriteTo.Console()
-    .WriteTo.R2(services.GetRequiredService<ICloudflareHttpClient>,
+    .WriteTo.R2(services.GetRequiredService<ICloudflareR2Util>,
         accountId: "your-cloudflare-account-id",
         bucketName: "application-logs",
         prefix: "production/api"));

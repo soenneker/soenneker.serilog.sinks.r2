@@ -2,22 +2,19 @@ using System;
 using System.Collections.Generic;
 using System.Diagnostics.Metrics;
 using System.IO;
-using System.Linq;
-using System.Net.Http;
-using System.Net.Http.Headers;
+
 using System.Text;
-using System.Text.Json;
 using System.Threading;
 using System.Threading.Tasks;
 using Serilog.Core;
 using Serilog.Debugging;
 using Serilog.Events;
 using Serilog.Formatting.Json;
-using Soenneker.Cloudflare.HttpClient.Abstract;
+using Soenneker.Cloudflare.R2.Abstract;
 
 namespace Soenneker.Serilog.Sinks.R2;
 
-internal sealed class R2Sink(Func<ICloudflareHttpClient> getClient, R2Destination destination, int maxObjectBytes, TimeSpan timeout) : IBatchedLogEventSink
+internal sealed class R2Sink(Func<ICloudflareR2Util> getR2, R2Destination destination, int maxObjectBytes, TimeSpan timeout) : IBatchedLogEventSink
 {
     private static readonly AsyncLocal<bool> Uploading = new();
     private static readonly JsonFormatter Formatter = new(closingDelimiter: "\n");
@@ -29,10 +26,12 @@ internal sealed class R2Sink(Func<ICloudflareHttpClient> getClient, R2Destinatio
     private static readonly Counter<long> Oversized = Meter.CreateCounter<long>("r2.events.oversized");
 
     // Serilog delivers serially. A retry may contain new events after the original batch.
+    private readonly LimitedEventStream _buffer = new(maxObjectBytes);
+    private StreamWriter? _writer;
     private LogEvent? _first;
     private int _nextIndex;
-    private string? _pendingPath;
-    private ArraySegment<byte> _pendingBody;
+    private string? _pendingKey;
+    private int _pendingBytes;
 
     internal static bool UploadInProgress => Uploading.Value;
 
@@ -41,49 +40,69 @@ internal sealed class R2Sink(Func<ICloudflareHttpClient> getClient, R2Destinatio
         if (batch.Count == 0)
             return;
 
-        LogEvent first = batch.First();
-        if (!ReferenceEquals(first, _first))
+        using IEnumerator<LogEvent> entries = batch.GetEnumerator();
+        if (!entries.MoveNext())
+            return;
+        if (!ReferenceEquals(entries.Current, _first))
         {
             Reset();
-            _first = first;
+            _first = entries.Current;
         }
 
         Uploading.Value = true;
         try
         {
-            if (_pendingPath != null)
+            if (_pendingKey != null)
                 await UploadPending().ConfigureAwait(false);
 
-            using var line = new LimitedEventStream(maxObjectBytes);
-            using var writer = new StreamWriter(line, Utf8, leaveOpen: true);
-            using var chunk = new MemoryStream();
+            _buffer.SetLength(0);
+            _writer ??= new StreamWriter(_buffer, Utf8, leaveOpen: true);
             DateTimeOffset timestamp = default;
-            int index = _nextIndex;
-            foreach (LogEvent entry in batch.Skip(_nextIndex))
+            int index = 0;
+            do
             {
-                line.Reset();
-                Formatter.Format(entry, writer);
-                writer.Flush();
-                if (line.Oversized)
+                int eventIndex = index++;
+                if (eventIndex < _nextIndex)
+                    continue;
+
+                LogEvent entry = entries.Current;
+                _buffer.BeginEvent();
+                Formatter.Format(entry, _writer);
+                _writer.Flush();
+                int start = _buffer.EventStart;
+                if (_buffer.Oversized)
                 {
+                    _buffer.SetLength(start);
                     Oversized.Add(1);
                     SelfLog.WriteLine("R2 skipped an event at {0:o} exceeding the {1}-byte object limit.", entry.Timestamp, maxObjectBytes);
-                    index++;
                     continue;
                 }
 
-                if (chunk.Length + line.Length > maxObjectBytes)
-                    await Flush(chunk, timestamp, index).ConfigureAwait(false);
-
-                if (chunk.Length == 0)
+                if (_buffer.Length > maxObjectBytes)
+                {
+                    // The last complete line belongs to the next object. Move it only after the prefix is acknowledged.
+                    await Flush(start, timestamp, eventIndex).ConfigureAwait(false);
+                    byte[] bytes = _buffer.GetBuffer();
+                    int tail = checked((int)_buffer.Length) - start;
+                    bytes.AsSpan(start, tail).CopyTo(bytes);
+                    _buffer.SetLength(tail);
+                    start = 0;
+                }
+                if (start == 0)
                     timestamp = entry.Timestamp;
-                line.WriteTo(chunk);
-                index++;
-            }
+            } while (entries.MoveNext());
 
-            if (chunk.Length > 0)
-                await Flush(chunk, timestamp, index).ConfigureAwait(false);
+            if (_buffer.Length > 0)
+                await Flush(checked((int)_buffer.Length), timestamp, index).ConfigureAwait(false);
             Reset();
+            // Allow a full default-size object plus its boundary event to reuse the buffer.
+            ReleaseExcessCapacity(16 * 1024 * 1024);
+        }
+        catch
+        {
+            // Formatting can throw with partially buffered text. Start the next attempt with a clean encoder.
+            _writer = null;
+            throw;
         }
         finally
         {
@@ -91,35 +110,35 @@ internal sealed class R2Sink(Func<ICloudflareHttpClient> getClient, R2Destinatio
         }
     }
 
-    private async Task Flush(MemoryStream chunk, DateTimeOffset timestamp, int nextIndex)
+    private Task Flush(int count, DateTimeOffset timestamp, int nextIndex)
     {
-        _pendingPath = destination.NewPath(timestamp);
-        _pendingBody = new ArraySegment<byte>(chunk.GetBuffer(), 0, checked((int)chunk.Length));
+        _pendingKey = destination.NewKey(timestamp);
+        _pendingBytes = count;
         _nextIndex = nextIndex;
-        await UploadPending().ConfigureAwait(false);
-        chunk.SetLength(0);
+        return UploadPending();
     }
 
+    private void ReleaseExcessCapacity(int retainedBytes)
+    {
+        _buffer.SetLength(0);
+        if (_buffer.Capacity > retainedBytes)
+            _buffer.Capacity = 0;
+    }
     private async Task UploadPending()
     {
         using var deadline = new CancellationTokenSource(timeout);
         try
         {
-            HttpClient client = await getClient().Get(deadline.Token).ConfigureAwait(false);
-            using var body = new ByteArrayContent(_pendingBody.Array!, _pendingBody.Offset, _pendingBody.Count);
-            body.Headers.ContentType = new MediaTypeHeaderValue("application/x-ndjson");
-            using var request = new HttpRequestMessage(HttpMethod.Put, _pendingPath) { Content = body };
-            using var response = await client.SendAsync(request, HttpCompletionOption.ResponseHeadersRead, deadline.Token).ConfigureAwait(false);
-            response.EnsureSuccessStatusCode();
-            await response.Content.LoadIntoBufferAsync(64 * 1024, deadline.Token).ConfigureAwait(false);
-            using var envelope = JsonDocument.Parse(await response.Content.ReadAsByteArrayAsync(deadline.Token).ConfigureAwait(false));
-            if (!envelope.RootElement.TryGetProperty("success", out JsonElement success) || success.ValueKind != JsonValueKind.True)
+            using var content = new MemoryStream(_buffer.GetBuffer(), 0, _pendingBytes, writable: false);
+            var response = await getR2().PutObject(destination.AccountId, destination.BucketName, _pendingKey!, content,
+                "application/x-ndjson", cancellationToken: deadline.Token).ConfigureAwait(false);
+            if (response?.Success != true)
                 throw new InvalidDataException("Cloudflare did not acknowledge the R2 upload.");
 
             Uploaded.Add(1);
-            Bytes.Add(_pendingBody.Count);
-            _pendingPath = null;
-            _pendingBody = default;
+            Bytes.Add(_pendingBytes);
+            _pendingKey = null;
+            _pendingBytes = 0;
         }
         catch
         {
@@ -132,14 +151,14 @@ internal sealed class R2Sink(Func<ICloudflareHttpClient> getClient, R2Destinatio
     {
         _first = null;
         _nextIndex = 0;
-        _pendingPath = null;
-        _pendingBody = default;
+        _pendingKey = null;
+        _pendingBytes = 0;
     }
 
     public Task OnEmptyBatchAsync()
     {
         Reset();
+        ReleaseExcessCapacity(64 * 1024);
         return Task.CompletedTask;
     }
 }
-

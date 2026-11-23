@@ -42,14 +42,10 @@
         <None Include="..\..\README.md" Pack="true" PackagePath="\" />
         <None Include="..\..\LICENSE" Pack="true" PackagePath="\" />
         <None Include="..\..\icon.png" Pack="true" PackagePath="\" />
-        <!--<Content Include="Resources\ffmpeg.exe" Pack="true" PackageCopyToOutput="true" />-->
     </ItemGroup>
     <ItemGroup>
         <InternalsVisibleTo Include="Soenneker.Serilog.Sinks.R2.Tests" />
         <PackageReference Include="Serilog" Version="4.4.0" />
-        <PackageReference Include="Soenneker.Cloudflare.HttpClient" Version="11.0.556" />
+        <PackageReference Include="Soenneker.Cloudflare.R2" Version="11.0.176" />
     </ItemGroup>
 </Project>
-
-
-

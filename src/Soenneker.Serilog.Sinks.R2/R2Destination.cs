@@ -7,14 +7,18 @@ namespace Soenneker.Serilog.Sinks.R2;
 
 internal sealed class R2Destination
 {
-    private readonly string _path;
+    private readonly string _prefix;
+    internal string AccountId { get; }
+    internal string BucketName { get; }
 
     internal R2Destination(string accountId, string bucketName, string prefix)
     {
         ValidateSegment(accountId, nameof(accountId));
         ValidateSegment(bucketName, nameof(bucketName));
-        _path = $"accounts/{Uri.EscapeDataString(accountId)}/r2/buckets/{Uri.EscapeDataString(bucketName)}/objects/";
+        AccountId = accountId;
+        BucketName = bucketName;
         prefix = prefix.Trim('/');
+        _prefix = prefix.Length == 0 ? string.Empty : prefix + "/";
         if (prefix.Length == 0)
             return;
 
@@ -23,16 +27,13 @@ internal sealed class R2Destination
             throw new ArgumentException("The resulting R2 key exceeds 1,024 UTF-8 bytes.", nameof(prefix));
 
         foreach (string segment in prefix.Split('/'))
-        {
             ValidateSegment(segment, nameof(prefix));
-            _path += Uri.EscapeDataString(segment) + "/";
-        }
     }
 
-    internal string NewPath(DateTimeOffset firstTimestamp)
+    internal string NewKey(DateTimeOffset firstTimestamp)
     {
         string date = firstTimestamp.UtcDateTime.ToString("yyyy'/'MM'/'dd", CultureInfo.InvariantCulture);
-        return $"{_path}{date}/{Guid.NewGuid()}.ndjson";
+        return $"{_prefix}{date}/{Guid.NewGuid()}.ndjson";
     }
 
     private static void ValidateSegment(string value, string parameter)

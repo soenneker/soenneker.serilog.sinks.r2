@@ -7,12 +7,12 @@ using System.Text;
 using System.Text.Json;
 using System.Threading;
 using System.Threading.Tasks;
-using NSubstitute;
+using Microsoft.Extensions.DependencyInjection;
 using Serilog;
 using Serilog.Configuration;
 using Serilog.Core;
 using Serilog.Events;
-using Soenneker.Cloudflare.HttpClient.Abstract;
+using Soenneker.Cloudflare.R2.Abstract;
 
 namespace Soenneker.Serilog.Sinks.R2.Tests;
 
@@ -38,13 +38,12 @@ public sealed class R2SinkTests
             };
         });
         using var http = new HttpClient(handler) { BaseAddress = new Uri("https://api.cloudflare.com/client/v4/") };
-        var transport = Substitute.For<ICloudflareHttpClient>();
-        transport.Get(Arg.Any<CancellationToken>()).Returns(new ValueTask<HttpClient>(http));
+        await using var services = R2TestServices.Create(http);
 
         int observed = 0;
         logger = new LoggerConfiguration().MinimumLevel.Debug()
             .WriteTo.Sink(new CountingSink(() => Interlocked.Increment(ref observed)))
-            .WriteTo.R2(() => transport, "account", "bucket", "/apps/service/",
+            .WriteTo.R2(services.GetRequiredService<ICloudflareR2Util>, "account", "bucket", "/apps/service/",
                 new BatchingOptions { BatchSizeLimit = retry ? 2 : 100, EagerlyEmitFirstEvent = false, BufferingTimeLimit = TimeSpan.FromMilliseconds(retry ? 50 : 60000) },
                 restrictedToMinimumLevel: LogEventLevel.Information)
             .CreateLogger();
@@ -82,8 +81,3 @@ public sealed class R2SinkTests
         await Assert.That(observed).IsEqualTo(retry ? 5 : 4);
     }
 }
-
-
-
-
-
